@@ -84,7 +84,6 @@ async function loadHtmlForWebview(webview: vscode.Webview, extensionUri: vscode.
  * Run 実行ハンドラ（既存のロジックをそのまま使用）
  */
 async function handleRun(message: any, panel: vscode.WebviewPanel, context: vscode.ExtensionContext) {
-  // message: { command: 'run', language: 'javascript'|'typescript', code: '...' }
   const workspaceFolders = vscode.workspace.workspaceFolders;
   if (!workspaceFolders || workspaceFolders.length === 0) {
     panel.webview.postMessage({ kind: "error", text: "ワークスペースが開かれていません。まずワークスペースを開いてください。" });
@@ -105,38 +104,61 @@ async function handleRun(message: any, panel: vscode.WebviewPanel, context: vsco
     return;
   }
 
-  // 実行コマンド（要求どおり node を実行）
   const execCmd = `node ${tmpFileName}`;
   const options = { cwd: workspaceRoot, maxBuffer: 10 * 1024 * 1024 };
 
   panel.webview.postMessage({ kind: "status", text: `実行: ${execCmd}` });
 
-  const child = exec(execCmd, options, (error, stdout, stderr) => {
-    const outText = stdout || "";
-    const errText = stderr || (error ? String(error) : "");
+  // exec をコールバック無しで呼び出し、child を受け取る
+  const child = exec(execCmd, options);
+
+  // バッファ（デバッグや最終送信用に保持するが、UIにはストリームで送る）
+  let stdoutBuf = "";
+  let stderrBuf = "";
+
+  if (child.stdout) {
+    child.stdout.on("data", (chunk: Buffer | string) => {
+      const s = String(chunk);
+      stdoutBuf += s;
+      // ストリームとして随時送る（UI 側は stream を追う）
+      panel.webview.postMessage({ kind: "stream", stdout: s });
+    });
+  }
+
+  if (child.stderr) {
+    child.stderr.on("data", (chunk: Buffer | string) => {
+      const s = String(chunk);
+      stderrBuf += s;
+      panel.webview.postMessage({ kind: "stream", stderr: s });
+    });
+  }
+
+  // プロセス終了時に終了コードを送って一時ファイルを削除する
+  child.on("close", (code: number | null, signal: string | null) => {
     panel.webview.postMessage({
-      kind: "result",
-      stdout: outText,
-      stderr: errText
+      kind: "exit",
+      code: code,
+      signal: signal,
+      // 必要なら最終バッファも付けるが、UI 側で既にストリームを受け取っているなら重複を避けるため不要です。
+      // stdout: stdoutBuf,
+      // stderr: stderrBuf
     });
 
-    // 一時ファイルのクリーンアップ（失敗しても無視）
+    try {
+      fs.unlinkSync(tmpFilePath);
+    } catch (e) {
+      // ignore cleanup errors
+    }
+  });
+
+  child.on("error", (err: Error) => {
+    // まれに spawn エラーなどが起きたとき
+    panel.webview.postMessage({ kind: "error", text: `実行エラー: ${String(err)}` });
+
     try {
       fs.unlinkSync(tmpFilePath);
     } catch (e) {}
   });
-
-  // 実行中のストリームを随時送る（リアルタイム表示）
-  if (child.stdout) {
-    child.stdout.on("data", (chunk: Buffer | string) => {
-      panel.webview.postMessage({ kind: "stream", stdout: String(chunk) });
-    });
-  }
-  if (child.stderr) {
-    child.stderr.on("data", (chunk: Buffer | string) => {
-      panel.webview.postMessage({ kind: "stream", stderr: String(chunk) });
-    });
-  }
 }
 
 /** nonce 生成ユーティリティ */

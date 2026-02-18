@@ -135,6 +135,9 @@
       case "info":
         appendOutput(`[info] ${msg.text}\n`);
         break;
+      case "exit":
+        appendOutput(`\n[process exited, code=${msg.code}, signal=${msg.signal}]\n`);
+        break;
     }
   });
 
