@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import * as path from "path";
 import * as fs from "fs";
-import { exec } from "child_process";
+import { runCommand, LangConfigEntry } from "./runner";
 
 /**
  * 拡張の有効化
@@ -84,10 +84,8 @@ async function loadHtmlForWebview(webview: vscode.Webview, extensionUri: vscode.
 }
 
 /**
- * 実行ハンドラ
+ * Run メッセージを受け、runner に処理委譲する
  * message: { command: 'run', language, code, execCommand }
- * - execCommand は Webview の textarea の値（ユーザーが編集済みの可能性あり）
- * - ただし、execCommand が空の場合は config の command を使う
  */
 async function handleRun(message: any, panel: vscode.WebviewPanel, context: vscode.ExtensionContext) {
   const workspaceFolders = vscode.workspace.workspaceFolders;
@@ -103,7 +101,7 @@ async function handleRun(message: any, panel: vscode.WebviewPanel, context: vsco
 
   // read config again (defensive)
   const configPath = path.join(context.extensionPath, "media", "langConfig.json");
-  let langConfig: any = {};
+  let langConfig: { [k: string]: LangConfigEntry } = {};
   try {
     const txt = fs.readFileSync(configPath, { encoding: "utf8" });
     langConfig = JSON.parse(txt);
@@ -117,89 +115,17 @@ async function handleRun(message: any, panel: vscode.WebviewPanel, context: vsco
     return;
   }
 
-  const tmpFileName = conf.filename || (lang === "typescript" ? "sandbox_temp.ts" : "sandbox_temp.js");
-  const tmpFilePath = path.join(workspaceRoot, tmpFileName);
-
-  try {
-    // write provided code to the configured filename (overwrites if exists)
-    fs.writeFileSync(tmpFilePath, code, { encoding: "utf8" });
-  } catch (err) {
-    panel.webview.postMessage({ kind: "error", text: `一時ファイル書き込みエラー: ${String(err)}` });
-    return;
-  }
-
-  // determine exec command: priority -> userExecCommand (non-empty) else conf.command
-  let execCmd: string;
-  const baseCmd = userExecCommand.length > 0 ? userExecCommand : (conf.command || "");
-  if (baseCmd.includes("{file}")) {
-    execCmd = baseCmd.replace(/{file}/g, tmpFileName);
-  } else {
-    execCmd = `${baseCmd} ${tmpFileName}`.trim();
-  }
-
-  const options = { cwd: workspaceRoot, maxBuffer: 20 * 1024 * 1024 };
-  panel.webview.postMessage({ kind: "status", text: `実行: ${execCmd}` });
-
-  // exec をコールバック無しで呼び出し、child を扱う（ストリームで逐次転送）
-  const child = exec(execCmd, options);
-
-  if (child.stdout) {
-    child.stdout.on("data", (chunk: Buffer | string) => {
-      panel.webview.postMessage({ kind: "stream", stdout: String(chunk) });
-    });
-  }
-  if (child.stderr) {
-    child.stderr.on("data", (chunk: Buffer | string) => {
-      panel.webview.postMessage({ kind: "stream", stderr: String(chunk) });
-    });
-  }
-
-  child.on("close", (code: number | null, signal: string | null) => {
-    panel.webview.postMessage({
-      kind: "exit",
-      code: code,
-      signal: signal
-    });
-
-    // cleanup: always delete temp file
-    try {
-      fs.unlinkSync(tmpFilePath);
-    } catch (e) {
-      // ignore
-    }
-
-    // delete additional files declared in conf.deletefile
-    // conf.deletefile may be empty string or comma-separated list
-    try {
-      const df = conf.deletefile;
-      if (df && typeof df === "string" && df.trim().length > 0) {
-        // support comma-separated values, trim spaces
-        const targets = df.split(",").map((s: string) => s.trim()).filter((s: string) => s.length > 0);
-        for (const t of targets) {
-          // if t is relative, resolve to workspaceRoot
-          const targetPath = path.isAbsolute(t) ? t : path.join(workspaceRoot, t);
-          try {
-            if (fs.existsSync(targetPath)) {
-              fs.unlinkSync(targetPath);
-            }
-          } catch (e) {
-            // ignore individual failures
-          }
-        }
-      }
-    } catch (e) {
-      // ignore
-    }
-  });
-
-  child.on("error", (err: Error) => {
-    panel.webview.postMessage({ kind: "error", text: `実行エラー: ${String(err)}` });
-    // attempt cleanup
-    try { fs.unlinkSync(tmpFilePath); } catch (e) {}
+  // runner に処理委譲
+  await runCommand({
+    workspaceRoot,
+    lang,
+    code,
+    userExecCommand,
+    conf,
+    panel
   });
 }
 
-/** nonce 生成ユーティリティ */
 function getNonce() {
   let text = "";
   const possible = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
