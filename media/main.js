@@ -12,23 +12,47 @@
   let monacoEditor = null;
   let monacoInstance = null;
   let model = null;
-  let currentLang = langSelect.value || "javascript";
+  let currentLang = null;
 
-  const templates = {
-    javascript: `// JavaScript template\nconsole.log("Hello from Monaco sandbox (JS)");\n`,
-    typescript: `// TypeScript template\nconst greet = (name: string) => {\n  return \`Hello, \${name} (TS)\`;\n};\nconsole.log(greet("World"));\n`
-  };
+  // LANG_CONFIG は extension.ts により注入される
+  const LANG_CONFIG = window.LANG_CONFIG || {};
 
-  // デフォルトの実行コマンドを言語ごとに設定
-  const defaultCommands = {
-    javascript: "node {file}",
-    typescript: "node {file}" // ts-node などを使いたければユーザーが書き換える
-  };
+  // If no langs defined, fallback
+  if (!LANG_CONFIG || Object.keys(LANG_CONFIG).length === 0) {
+    appendOutput("[error] 言語設定が見つかりません。langConfig.json を確認してください。\n");
+  }
 
-  // 初期コマンドセット
-  execCommandTextarea.value = defaultCommands[currentLang];
+  // Build language select options dynamically
+  function buildLangOptions() {
+    const langs = Object.keys(LANG_CONFIG);
+    // Clear existing
+    langSelect.innerHTML = "";
+    for (const l of langs) {
+      const opt = document.createElement("option");
+      opt.value = l;
+      opt.textContent = l;
+      langSelect.appendChild(opt);
+    }
+    // Set currentLang to first if not set
+    if (!currentLang) currentLang = langs[0];
+    langSelect.value = currentLang;
+  }
 
-  // load Monaco via require.js
+  // templates / default commands from config
+  function getTemplateFor(lang) {
+    const c = LANG_CONFIG[lang];
+    return (c && c.templatecode) ? c.templatecode : "";
+  }
+  function getCommandFor(lang) {
+    const c = LANG_CONFIG[lang];
+    return (c && c.command) ? c.command : "";
+  }
+  function getFilenameFor(lang) {
+    const c = LANG_CONFIG[lang];
+    return (c && c.filename) ? c.filename : (lang === "typescript" ? "sandbox_temp.ts" : "sandbox_temp.js");
+  }
+
+  // Load Monaco via CDN (require.js)
   function loadMonaco() {
     const requireScript = document.createElement("script");
     requireScript.src = "https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.6/require.min.js";
@@ -58,7 +82,7 @@
   }
 
   function createEditor() {
-    const initial = templates[currentLang] || "";
+    const initial = getTemplateFor(currentLang) || "";
     model = monacoInstance.editor.createModel(initial, currentLang === "typescript" ? "typescript" : "javascript");
 
     monacoEditor = monacoInstance.editor.create(editorContainer, {
@@ -69,9 +93,21 @@
       scrollBeyondLastLine: false,
       theme: "vs-dark"
     });
+
+    // set initial execCommand from config
+    execCommandTextarea.value = getCommandFor(currentLang) || "";
   }
 
-  // 言語切替: モデル言語を切り替え、textareaのデフォルトコマンドも切り替える
+  // Initialize language options and editor
+  buildLangOptions();
+  if (Object.keys(LANG_CONFIG).length > 0) {
+    currentLang = langSelect.value;
+  } else {
+    currentLang = "javascript";
+  }
+  loadMonaco();
+
+  // On language change: change model language, update template and execCommand textarea
   langSelect.addEventListener("change", (ev) => {
     const lang = ev.target.value;
     currentLang = lang;
@@ -79,22 +115,22 @@
       const monLang = lang === "typescript" ? "typescript" : "javascript";
       monacoInstance.editor.setModelLanguage(model, monLang);
     }
-    setEditorContent(templates[lang] || "");
-    // exec コマンドを言語デフォルトに更新（ユーザーが既に編集している場合は上書きしない方が良いが、簡易実装では切替で上書き）
-    execCommandTextarea.value = defaultCommands[lang] || "";
+    // update editor content to template for this language
+    const tmpl = getTemplateFor(lang);
+    if (model && typeof model.setValue === "function") {
+      model.setValue(tmpl);
+    }
+    // set exec command from config (initial prefilling). We do NOT prevent user edits afterwards.
+    const cmd = getCommandFor(lang);
+    execCommandTextarea.value = cmd || "";
   });
-
-  function setEditorContent(text) {
-    if (!model) return;
-    model.setValue(text);
-  }
 
   function getEditorContent() {
     if (!model) return "";
     return model.getValue();
   }
 
-  // Run ボタン: コードと execCommand を送信
+  // Run: post message with execCommand and selected language
   runBtn.addEventListener("click", () => {
     const code = getEditorContent();
     const execCommand = execCommandTextarea.value || "";
@@ -104,11 +140,14 @@
 
   loadTemplateBtn.addEventListener("click", () => {
     if (confirm("テンプレートを読み込みます。現在の内容は上書きされます。よろしいですか？")) {
-      setEditorContent(templates[currentLang] || "");
+      const tmpl = getTemplateFor(currentLang) || "";
+      if (model && typeof model.setValue === "function") {
+        model.setValue(tmpl);
+      }
     }
   });
 
-  // extension からのメッセージ受け取り
+  // Messages from extension
   window.addEventListener("message", (ev) => {
     const msg = ev.data;
     if (!msg || !msg.kind) return;
@@ -137,7 +176,5 @@
     outputArea.scrollTop = outputArea.scrollHeight;
   }
 
-  // 初期処理
-  appendOutput("Monaco sandbox initializing...\n");
-  loadMonaco();
+  appendOutput("Monaco sandbox ready. 言語を選択して実行してください。\n");
 })();
