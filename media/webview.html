@@ -2,7 +2,6 @@
 <html lang="ja">
 <head>
   <meta charset="UTF-8" />
-  <!-- CSP: nonce をインラインスクリプトに適用 -->
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'none'; img-src %BASE_URI% https: data:; style-src 'unsafe-inline' %BASE_URI% https:; script-src 'nonce-%NONCE%' https:; connect-src https: http: ws: %BASE_URI%;">
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -19,6 +18,15 @@
     <button id="loadTemplateBtn">Load Template</button>
   </div>
 
+  <!-- コマンド編集領域 -->
+  <div class="cmd-area">
+    <textarea id="execCommand" placeholder="実行コマンドをここに記述。{file} がテンポラリファイル名に置換されます。例: node {file}"></textarea>
+    <div class="note">
+      <div>説明: `{file}` は一時ファイル名に置換されます。</div>
+      <div>例: <code>node {file}</code>、<code>ts-node {file}</code>、<code>node --inspect {file}</code></div>
+    </div>
+  </div>
+
   <div id="editor" class="editor"></div>
 
   <div class="output">
@@ -26,7 +34,6 @@
     <pre id="outputArea" class="output-area"></pre>
   </div>
 
-  <!-- main UI script: extension.ts が %SCRIPT_URI% を置換します -->
   <script nonce="%NONCE%" src="%SCRIPT_URI%"></script>
 </body>
 </html>
