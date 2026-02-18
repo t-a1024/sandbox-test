@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <!-- CSP: nonce をインラインスクリプトに適用 -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; img-src %BASE_URI% https: data:; style-src 'unsafe-inline' %BASE_URI% https:; script-src 'nonce-%NONCE%' https:; connect-src https: http: ws: %BASE_URI%;">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link href="%STYLE_URI%" rel="stylesheet" />
+  <title>Sandbox (Monaco)</title>
+</head>
+<body>
+  <div class="toolbar">
+    <select id="langSelect">
+      <option value="javascript">JavaScript</option>
+      <option value="typescript">TypeScript</option>
+    </select>
+    <button id="runBtn">Run</button>
+    <button id="loadTemplateBtn">Load Template</button>
+  </div>
+
+  <div id="editor" class="editor"></div>
+
+  <div class="output">
+    <div class="output-header">Output</div>
+    <pre id="outputArea" class="output-area"></pre>
+  </div>
+
+  <!-- main UI script: extension.ts が %SCRIPT_URI% を置換します -->
+  <script nonce="%NONCE%" src="%SCRIPT_URI%"></script>
+</body>
+</html>

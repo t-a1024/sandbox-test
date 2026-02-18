@@ -3,6 +3,9 @@ import * as path from "path";
 import * as fs from "fs";
 import { exec } from "child_process";
 
+/**
+ * 拡張の有効化
+ */
 export function activate(context: vscode.ExtensionContext) {
   const disposable = vscode.commands.registerCommand("sandbox.open", async () => {
     const panel = vscode.window.createWebviewPanel(
@@ -12,12 +15,18 @@ export function activate(context: vscode.ExtensionContext) {
       {
         enableScripts: true,
         retainContextWhenHidden: true,
+        // ローカルリソース参照を許可するルート
         localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "media")]
       }
     );
 
-    panel.webview.html = getWebviewContent(panel.webview, context.extensionUri);
+    try {
+      panel.webview.html = await loadHtmlForWebview(panel.webview, context.extensionUri);
+    } catch (err) {
+      panel.webview.html = `<html><body><h2>HTML読み込みエラー</h2><pre>${String(err)}</pre></body></html>`;
+    }
 
+    // webview からのメッセージを受け取る
     panel.webview.onDidReceiveMessage(
       async (message) => {
         switch (message.command) {
@@ -36,56 +45,49 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(disposable);
 }
 
+/**
+ * 非アクティベート処理（必要なら）
+ */
 export function deactivate() {
-  // no-op
+  // noop
 }
 
-function getWebviewContent(webview: vscode.Webview, extensionUri: vscode.Uri) {
+/**
+ * media/webview.html を読み込み、プレースホルダを置換して返す
+ */
+async function loadHtmlForWebview(webview: vscode.Webview, extensionUri: vscode.Uri): Promise<string> {
+  // media/webview.html の絶対パス
+  const htmlPath = vscode.Uri.joinPath(extensionUri, "media", "webview.html").fsPath;
+
+  let html = fs.readFileSync(htmlPath, { encoding: "utf8" });
+
+  // Webview 内で使う各リソースの webview URI を作る
   const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, "media", "main.js"));
   const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, "media", "styles.css"));
 
-  // nonce for CSP
+  // nonce を生成して CSP 用に差し替え
   const nonce = getNonce();
 
-  // Note: we will load require.js & Monaco from CDN inside webview script.
-  // CSP allows scripts from https: and the nonce for inline script if needed.
-  return `<!DOCTYPE html>
-<html lang="ja">
-<head>
-<meta charset="UTF-8" />
-<meta http-equiv="Content-Security-Policy"
-      content="default-src 'none'; img-src ${webview.cspSource} https: data:; style-src 'unsafe-inline' ${webview.cspSource} https:; script-src 'nonce-${nonce}' https:; connect-src https: http: ws: ${webview.cspSource};">
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<link href="${styleUri}" rel="stylesheet" />
-<title>Sandbox (Monaco)</title>
-</head>
-<body>
-  <div class="toolbar">
-    <select id="langSelect">
-      <option value="javascript">JavaScript</option>
-      <option value="typescript">TypeScript</option>
-    </select>
-    <button id="runBtn">Run</button>
-    <button id="loadTemplateBtn">Load Template</button>
-  </div>
+  // (任意) media フォルダをベースURIとして提供したければ置換
+  const baseUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, "media"));
 
-  <div id="editor" class="editor"></div>
+  // プレースホルダ置換
+  html = html.replace(/%SCRIPT_URI%/g, String(scriptUri));
+  html = html.replace(/%STYLE_URI%/g, String(styleUri));
+  html = html.replace(/%NONCE%/g, nonce);
+  html = html.replace(/%BASE_URI%/g, String(baseUri));
 
-  <div class="output">
-    <div class="output-header">Output</div>
-    <pre id="outputArea" class="output-area"></pre>
-  </div>
-
-  <!-- main UI script -->
-  <script nonce="${nonce}" src="${scriptUri}"></script>
-</body>
-</html>`;
+  return html;
 }
 
+/**
+ * Run 実行ハンドラ（既存のロジックをそのまま使用）
+ */
 async function handleRun(message: any, panel: vscode.WebviewPanel, context: vscode.ExtensionContext) {
+  // message: { command: 'run', language: 'javascript'|'typescript', code: '...' }
   const workspaceFolders = vscode.workspace.workspaceFolders;
   if (!workspaceFolders || workspaceFolders.length === 0) {
-    panel.webview.postMessage({ kind: "error", text: "ワークスペースが開かれていません。ワークスペースを開いてください。" });
+    panel.webview.postMessage({ kind: "error", text: "ワークスペースが開かれていません。まずワークスペースを開いてください。" });
     return;
   }
 
@@ -103,7 +105,7 @@ async function handleRun(message: any, panel: vscode.WebviewPanel, context: vsco
     return;
   }
 
-  // Execute per user's requirement: run `node sandbox_temp.js` or `node sandbox_temp.ts`
+  // 実行コマンド（要求どおり node を実行）
   const execCmd = `node ${tmpFileName}`;
   const options = { cwd: workspaceRoot, maxBuffer: 10 * 1024 * 1024 };
 
@@ -118,14 +120,13 @@ async function handleRun(message: any, panel: vscode.WebviewPanel, context: vsco
       stderr: errText
     });
 
-    // cleanup
+    // 一時ファイルのクリーンアップ（失敗しても無視）
     try {
       fs.unlinkSync(tmpFilePath);
-    } catch (e) {
-      // ignore
-    }
+    } catch (e) {}
   });
 
+  // 実行中のストリームを随時送る（リアルタイム表示）
   if (child.stdout) {
     child.stdout.on("data", (chunk: Buffer | string) => {
       panel.webview.postMessage({ kind: "stream", stdout: String(chunk) });
@@ -138,6 +139,7 @@ async function handleRun(message: any, panel: vscode.WebviewPanel, context: vsco
   }
 }
 
+/** nonce 生成ユーティリティ */
 function getNonce() {
   let text = "";
   const possible = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
