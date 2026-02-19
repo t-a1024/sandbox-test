@@ -21,8 +21,10 @@ export interface LangConfigEntry {
  * - userExecCommand: Webview の textarea でユーザーが入力したコマンド（空文字なら config の command を使う）
  * - conf: 言語ごとの設定（LangConfigEntry）
  * - panel: webview のパネル（メッセージ送信用）
- *
- * Promise を返す。内部でメッセージを panel.webview.postMessage(...) で送信する。
+ * 
+ * - panel があれば panel.webview.postMessage で stream/exit/status/error を送る
+ * - panel が無ければ stdout/stderr を集めて Promise で返す
+ * 戻り値: Promise<{ stdout: string, stderr: string, code: number|null, signal: string|null }>
  */
 export async function runCommand(opts: {
   workspaceRoot: string;
@@ -30,8 +32,8 @@ export async function runCommand(opts: {
   code: string;
   userExecCommand: string;
   conf: LangConfigEntry;
-  panel: vscode.WebviewPanel;
-}): Promise<void> {
+  panel?: vscode.WebviewPanel; // optional
+}): Promise<{ stdout: string; stderr: string; code: number | null; signal: string | null }> {
   const { workspaceRoot, lang, code, userExecCommand, conf, panel } = opts;
 
   // 決定ファイル名（conf.filename があれば使う。無ければ言語に応じたデフォルト）
@@ -42,8 +44,8 @@ export async function runCommand(opts: {
   try {
     fs.writeFileSync(tmpFilePath, code, { encoding: "utf8" });
   } catch (err) {
-    panel.webview.postMessage({ kind: "error", text: `一時ファイル書き込みエラー: ${String(err)}` });
-    return;
+    if (panel) panel.webview.postMessage({ kind: "error", text: `一時ファイル書き込みエラー: ${String(err)}` });
+    throw err;
   }
 
   // 2) 実行コマンド決定（優先: userExecCommand 非空 → それを使用。空なら conf.command）
@@ -53,57 +55,48 @@ export async function runCommand(opts: {
     // safety fallback
     execCmd = `node ${tmpFileName}`;
   } else {
-    if (baseCmd.includes("{file}")) {
-      execCmd = baseCmd.replace(/{file}/g, tmpFileName);
-    } else {
-      execCmd = `${baseCmd} ${tmpFileName}`.trim();
-    }
+    execCmd = baseCmd.includes("{file}") ? baseCmd.replace(/{file}/g, tmpFileName) : `${baseCmd} ${tmpFileName}`.trim();
   }
 
-  panel.webview.postMessage({ kind: "status", text: `実行: ${execCmd}` });
+  if (panel) panel.webview.postMessage({ kind: "status", text: `実行: ${execCmd}` });
 
   // 3) プロセス起動（exec）。ストリームで送信、終了時にファイル削除などを行う
   let child: ChildProcess;
   try {
-    child = exec(execCmd, { cwd: workspaceRoot, maxBuffer: 20 * 1024 * 1024 });
+    child = exec(execCmd, { cwd: workspaceRoot, maxBuffer: 40 * 1024 * 1024 });
   } catch (err) {
-    panel.webview.postMessage({ kind: "error", text: `プロセス起動エラー: ${String(err)}` });
-    // try cleanup
-    try { fs.unlinkSync(tmpFilePath); } catch (e) {}
-    return;
+    if (panel) panel.webview.postMessage({ kind: "error", text: `プロセス起動エラー: ${String(err)}` });
+    try { fs.unlinkSync(tmpFilePath); } catch (_) {}
+    throw err;
   }
 
-  // ストリーム受け取り
+  let stdoutBuf = "";
+  let stderrBuf = "";
+
   if (child.stdout) {
     child.stdout.on("data", (chunk: Buffer | string) => {
-      panel.webview.postMessage({ kind: "stream", stdout: String(chunk) });
+      const s = String(chunk);
+      stdoutBuf += s;
+      if (panel) panel.webview.postMessage({ kind: "stream", stdout: s });
     });
   }
   if (child.stderr) {
     child.stderr.on("data", (chunk: Buffer | string) => {
-      panel.webview.postMessage({ kind: "stream", stderr: String(chunk) });
+      const s = String(chunk);
+      stderrBuf += s;
+      if (panel) panel.webview.postMessage({ kind: "stream", stderr: s });
     });
   }
 
-  // 終了とクリーンアップは Promise で待てるようにする
-  await new Promise<void>((resolve) => {
+  // wait for close
+  const result = await new Promise<{ stdout: string; stderr: string; code: number | null; signal: string | null }>((resolve) => {
     child.on("close", (code: number | null, signal: string | null) => {
-      panel.webview.postMessage({
-        kind: "exit",
-        code,
-        signal
-      });
+      if (panel) panel.webview.postMessage({ kind: "exit", code, signal });
 
-      // 常に一時ファイルを削除
-      try {
-        if (fs.existsSync(tmpFilePath)) {
-          fs.unlinkSync(tmpFilePath);
-        }
-      } catch (e) {
-        // ignore
-      }
+      // cleanup temp file
+      try { if (fs.existsSync(tmpFilePath)) fs.unlinkSync(tmpFilePath); } catch (_) {}
 
-      // conf.deletefile を処理（空文字 or comma-separated）
+      // delete additional files listed in conf.deletefile
       try {
         const df = (conf && conf.deletefile) ? conf.deletefile : "";
         if (typeof df === "string" && df.trim().length > 0) {
@@ -111,30 +104,20 @@ export async function runCommand(opts: {
           for (const t of targets) {
             // 相対パスは workspaceRoot 基準で解決、絶対パスはそのまま
             const targetPath = path.isAbsolute(t) ? t : path.join(workspaceRoot, t);
-            try {
-              if (fs.existsSync(targetPath)) {
-                fs.unlinkSync(targetPath);
-              }
-            } catch (e) {
-              // ignore individual failure
-            }
+            try { if (fs.existsSync(targetPath)) fs.unlinkSync(targetPath); } catch (_) {}
           }
         }
-      } catch (e) {
-        // ignore
-      }
+      } catch (_) {}
 
-      resolve();
+      resolve({ stdout: stdoutBuf, stderr: stderrBuf, code, signal });
     });
 
     child.on("error", (err: Error) => {
-      panel.webview.postMessage({ kind: "error", text: `実行中のエラー: ${String(err)}` });
-      // attempt cleanup
-      try { if (fs.existsSync(tmpFilePath)) fs.unlinkSync(tmpFilePath); } catch (e) {}
-      resolve();
+      if (panel) panel.webview.postMessage({ kind: "error", text: `実行中のエラー: ${String(err)}` });
+      try { if (fs.existsSync(tmpFilePath)) fs.unlinkSync(tmpFilePath); } catch (_) {}
+      resolve({ stdout: stdoutBuf, stderr: stderrBuf + String(err), code: null, signal: null });
     });
   });
 
-  // runCommand 完了
-  return;
+  return result;
 }

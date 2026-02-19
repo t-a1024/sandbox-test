@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; img-src %BASE_URI% https: data:; style-src 'unsafe-inline' %BASE_URI% https:; script-src 'nonce-%NONCE%' https:; connect-src https: http: ws: %BASE_URI%;">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <link href="%STYLE_URI%" rel="stylesheet" />
+  <title>Sandbox (embeddable)</title>
+
+  <!-- Lang config をインラインで注入 -->
+  %LANG_CONFIG_SCRIPT%
+</head>
+<body>
+  <!-- 他の webview に埋め込むときは <div id="sandbox-root"></div> のみを使います -->
+  <div id="sandbox-root"></div>
+
+  <!-- 初期化スクリプト（media/sandbox_init.js）を読み込む -->
+  <script nonce="%NONCE%" src="%SCRIPT_URI%"></script>
+</body>
+</html>

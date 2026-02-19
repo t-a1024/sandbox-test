@@ -1,13 +1,14 @@
+// src/extension.ts (修正版)
 import * as vscode from "vscode";
 import * as path from "path";
 import * as fs from "fs";
 import { runCommand, LangConfigEntry } from "./runner";
 
-/**
- * 拡張の有効化
- */
+/** コマンド名 */
+const OPEN_CMD = "sandbox.open";
+
 export function activate(context: vscode.ExtensionContext) {
-  const disposable = vscode.commands.registerCommand("sandbox.open", async () => {
+  const disposable = vscode.commands.registerCommand(OPEN_CMD, async () => {
     const panel = vscode.window.createWebviewPanel(
       "sandboxView",
       "Sandbox",
@@ -20,19 +21,26 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     try {
-      panel.webview.html = await loadHtmlForWebview(panel.webview, context.extensionUri);
+      panel.webview.html = await loadSandboxHtml(panel.webview, context.extensionUri);
     } catch (err) {
-      panel.webview.html = `<html><body><h2>HTML読み込みエラー</h2><pre>${String(err)}</pre></body></html>`;
+      panel.webview.html = `<html><body><h2>読み込みエラー</h2><pre>${String(err)}</pre></body></html>`;
     }
 
+    // ← ここが重要: Webview からのメッセージを受け取るハンドラを必ず登録する
     panel.webview.onDidReceiveMessage(
       async (message) => {
+        // 期待する message: { command: 'run', language, code, execCommand }
+        if (!message || !message.command) {
+          panel.webview.postMessage({ kind: "error", text: "無効なメッセージを受信しました。" });
+          return;
+        }
+
         switch (message.command) {
           case "run":
-            await handleRun(message, panel, context);
-            return;
+            await handleRunFromWebview(message, panel, context);
+            break;
           default:
-            panel.webview.postMessage({ kind: "error", text: "Unknown command" });
+            panel.webview.postMessage({ kind: "error", text: `不明なコマンド: ${message.command}` });
         }
       },
       undefined,
@@ -47,59 +55,48 @@ export function deactivate() {
   // noop
 }
 
-/**
- * media/webview.html を読み込み、プレースホルダを置換して返す
- * ここで media/langConfig.json も読み、インラインスクリプトとして埋込む
- */
-async function loadHtmlForWebview(webview: vscode.Webview, extensionUri: vscode.Uri): Promise<string> {
-  const htmlPath = vscode.Uri.joinPath(extensionUri, "media", "webview.html").fsPath;
+async function loadSandboxHtml(webview: vscode.Webview, extensionUri: vscode.Uri): Promise<string> {
+  const htmlPath = vscode.Uri.joinPath(extensionUri, "media", "sandbox.html").fsPath;
   let html = fs.readFileSync(htmlPath, { encoding: "utf8" });
 
-  const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, "media", "main.js"));
+  const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, "media", "sandbox_init.js"));
   const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, "media", "styles.css"));
   const nonce = getNonce();
   const baseUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, "media"));
 
-  // read config json
+  // langConfig.json を読み込んで埋める
   const configPath = vscode.Uri.joinPath(extensionUri, "media", "langConfig.json").fsPath;
   let langConfig = {};
   try {
-    const txt = fs.readFileSync(configPath, { encoding: "utf8" });
-    langConfig = JSON.parse(txt);
+    langConfig = JSON.parse(fs.readFileSync(configPath, { encoding: "utf8" }));
   } catch (e) {
-    // fallback to empty config
     langConfig = {};
   }
-
-  // create inline script that sets window.LANG_CONFIG
-  const configScript = `<script nonce="${nonce}">window.LANG_CONFIG = ${JSON.stringify(langConfig)};</script>`;
+  const langConfigScript = `<script nonce="${nonce}">window.LANG_CONFIG = ${JSON.stringify(langConfig)};</script>`;
 
   html = html.replace(/%SCRIPT_URI%/g, String(scriptUri));
   html = html.replace(/%STYLE_URI%/g, String(styleUri));
   html = html.replace(/%NONCE%/g, nonce);
   html = html.replace(/%BASE_URI%/g, String(baseUri));
-  html = html.replace(/%LANG_CONFIG_SCRIPT%/g, configScript);
+  html = html.replace(/%LANG_CONFIG_SCRIPT%/g, langConfigScript);
 
   return html;
 }
 
-/**
- * Run メッセージを受け、runner に処理委譲する
- * message: { command: 'run', language, code, execCommand }
- */
-async function handleRun(message: any, panel: vscode.WebviewPanel, context: vscode.ExtensionContext) {
+/** Webview からの run メッセージを runner に渡す */
+async function handleRunFromWebview(message: any, panel: vscode.WebviewPanel, context: vscode.ExtensionContext) {
   const workspaceFolders = vscode.workspace.workspaceFolders;
   if (!workspaceFolders || workspaceFolders.length === 0) {
     panel.webview.postMessage({ kind: "error", text: "ワークスペースが開かれていません。まずワークスペースを開いてください。" });
     return;
   }
-
   const workspaceRoot = workspaceFolders[0].uri.fsPath;
+
   const lang = message.language;
   const code = message.code || "";
   const userExecCommand = (message.execCommand || "").trim();
 
-  // read config again (defensive)
+  // config を読み直す（防御的）
   const configPath = path.join(context.extensionPath, "media", "langConfig.json");
   let langConfig: { [k: string]: LangConfigEntry } = {};
   try {
@@ -115,15 +112,19 @@ async function handleRun(message: any, panel: vscode.WebviewPanel, context: vsco
     return;
   }
 
-  // runner に処理委譲
-  await runCommand({
-    workspaceRoot,
-    lang,
-    code,
-    userExecCommand,
-    conf,
-    panel
-  });
+  // runner に委譲
+  try {
+    await runCommand({
+      workspaceRoot,
+      lang,
+      code,
+      userExecCommand,
+      conf,
+      panel
+    });
+  } catch (err) {
+    panel.webview.postMessage({ kind: "error", text: `実行中に例外が発生しました: ${String(err)}` });
+  }
 }
 
 function getNonce() {
